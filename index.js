@@ -1,53 +1,56 @@
-import express from "express";
+import { onRequest } from "firebase-functions/v2/https";
+import * as admin from "firebase-admin";
 import axios from "axios";
-import dotenv from "dotenv";
-import admin from "firebase-admin";
+import crypto from "crypto";
 import { VertexAI } from "@google-cloud/vertexai";
 
-dotenv.config();
-const app = express();
-app.use(express.json());
+admin.initializeApp(); // uses default service account
+const db = admin.firestore();
 
+// Read secrets from environment (set in step 5)
 const {
-  PORT = 8080,
-  VERIFY_TOKEN,
   WHATSAPP_TOKEN,
   WHATSAPP_PHONE_ID,
-  GOOGLE_CLOUD_PROJECT,
+  VERIFY_TOKEN,
   VERTEX_LOCATION = "us-central1",
   GEMINI_MODEL = "gemini-2.5-flash",
 } = process.env;
 
-// Firestore (Admin SDK) — use ADC no Cloud Run; local: chave JSON se quiser
-if (!admin.apps.length) admin.initializeApp();
-const db = admin.firestore();
-
-// Gemini (Vertex AI)
-const vertex = new VertexAI({ project: GOOGLE_CLOUD_PROJECT, location: VERTEX_LOCATION });
+// Enable Vertex AI on this project and grant aiplatform.user to the Functions SA
+const vertex = new VertexAI({
+  project: process.env.GCLOUD_PROJECT,
+  location: VERTEX_LOCATION,
+});
 const model = vertex.getGenerativeModel({ model: GEMINI_MODEL });
 
-// Health opcional
-app.get("/", (_, res) => res.status(200).send("ok"));
+export const webhook = onRequest({ region: "us-central1" }, async (req, res) => {
+  // 1) Verification (GET)
+  if (req.method === "GET") {
+    const mode = req.query["hub.mode"];
+    const token = req.query["hub.verify_token"];
+    const challenge = req.query["hub.challenge"];
+    if (mode === "subscribe" && token === VERIFY_TOKEN) {
+      return res.status(200).send(challenge);
+    }
+    return res.sendStatus(403);
+  }
 
-// GET /webhook (verificação)
-app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-  if (mode === "subscribe" && token === VERIFY_TOKEN) return res.status(200).send(challenge);
-  return res.sendStatus(403);
-});
+  // 2) POST: (optional) validate signature for security
+  const sig = req.get("x-hub-signature-256");
+  const appSecret = process.env.APP_SECRET; // optional: set if you want signature check
+  if (sig && appSecret) {
+    const expected = "sha256=" + crypto.createHmac("sha256", appSecret).update(req.rawBody).digest("hex");
+    if (expected !== sig) return res.sendStatus(401);
+  }
 
-// POST /webhook (mensagens)
-app.post("/webhook", async (req, res) => {
   try {
-    const msg = req?.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const msg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!msg) return res.sendStatus(200);
 
-    const from = msg.from;                         // telefone do usuário
-    const text = msg.text?.body?.trim() || "";     // texto enviado
+    const from = msg.from;                  // user phone (E.164)
+    const text = msg.text?.body?.trim() ?? "";
 
-    // 1) Buscar/atualizar histórico no Firestore
+    // Firestore: persist short history
     const userRef = db.collection("whatsapp_users").doc(from);
     const snap = await userRef.get();
     const userData = snap.exists ? snap.data() : {};
@@ -56,10 +59,10 @@ app.post("/webhook", async (req, res) => {
     await userRef.set({
       lastMessageAt: nowIso,
       lastText: text,
-      history: admin.firestore.FieldValue.arrayUnion({ at: nowIso, user: text })
+      history: admin.firestore.FieldValue.arrayUnion({ at: nowIso, user: text }),
     }, { merge: true });
 
-    // 2) Montar prompt e chamar Gemini
+    // Gemini: generate a reply
     const prompt = `Você é um assistente de rotina médica. Histórico curto: ${JSON.stringify(userData).slice(0, 800)}.
 Pergunta do usuário: ${text}
 Responda em PT-BR, breve e útil.`;
@@ -70,12 +73,12 @@ Responda em PT-BR, breve e útil.`;
     const aiText = gen?.response?.candidates?.[0]?.content?.parts?.[0]?.text
       || "Não consegui gerar uma resposta agora.";
 
-    // 3) Salvar resposta no histórico
+    // Save bot reply
     await userRef.set({
       history: admin.firestore.FieldValue.arrayUnion({ at: nowIso, bot: aiText })
     }, { merge: true });
 
-    // 4) Responder no WhatsApp
+    // WhatsApp: send the reply
     await axios.post(
       `https://graph.facebook.com/v21.0/${WHATSAPP_PHONE_ID}/messages`,
       {
@@ -89,9 +92,7 @@ Responda em PT-BR, breve e útil.`;
 
     return res.sendStatus(200);
   } catch (e) {
-    console.error("Erro no webhook:", e?.response?.data || e);
-    return res.sendStatus(200); // evita retries em loop
+    console.error("Webhook error:", e?.response?.data || e);
+    return res.sendStatus(200);
   }
 });
-
-app.listen(PORT, "0.0.0.0", () => console.log(`OK em :${PORT}`));
