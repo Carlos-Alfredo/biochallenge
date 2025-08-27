@@ -1,83 +1,56 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8" />
+  <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Chat LLM</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 20px auto; }
-    #messages { border: 1px solid #ddd; padding: 12px; min-height: 300px; border-radius: 8px; }
-    .msg { margin: 8px 0; }
-    .user  { text-align: right; }
-    .model { text-align: left; color: #222; }
-    .role  { font-size: 12px; color: #666; }
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 24px auto; }
+    #messages { border:1px solid #ddd; min-height: 300px; padding:12px; border-radius:8px; }
+    .msg{ margin:10px 0 } .user{text-align:right} .model{text-align:left}
+    .role{font-size:12px;color:#666}
   </style>
 </head>
 <body>
-  <h1>Chat com LLM (Firebase + Vertex AI)</h1>
-
+  <h1>Chat (Firebase + Vertex AI)</h1>
   <div id="messages"></div>
-
-  <form id="form" style="margin-top:12px;">
-    <input id="input" placeholder="Digite sua pergunta..." style="width:80%;" />
+  <form id="f" style="margin-top:12px;">
+    <input id="q" placeholder="Escreva sua pergunta..." style="width:78%"/>
     <button>Enviar</button>
   </form>
 
   <script type="module">
-    // -------- Firebase Web SDK --------
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
     import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js";
-
     const firebaseConfig = {
-      apiKey: "AIzaSyDGVq3CK1X87lzyEVbXga8rAfF8ZU8oiGQ",
-      authDomain: "<PROJECT_ID>.firebaseapp.com",
-      projectId: "<PROJECT_ID>",
-      appId: "303945570078"
+      apiKey: "AIzaSyC7d5Ma_X9hr9Bvf_vztnpD7NZ5zBrzUGY",
+      authDomain: "biochallenge-database.firebaseapp.com",
+      projectId: "biochallenge-database",
+      appId: "1:303945570078:web:de1f33e0efa55459141b0f"
     };
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
 
-    let uid = null;
-    let chatId = "default";
-    const messages = [];
-    const $msgs = document.getElementById("messages");
-    const $form = document.getElementById("form");
-    const $input = document.getElementById("input");
+    let uid=null, chatId="default";
+    const msgs=[], box=document.getElementById('messages'), input=document.getElementById('q');
+    const form=document.getElementById('f');
+    const render=()=>{ box.innerHTML = msgs.map(m=>`
+      <div class="msg ${m.role}">
+        <div class="role">${m.role}</div><div>${m.content}</div>
+      </div>`).join(""); box.scrollTop=box.scrollHeight; };
 
-    function render() {
-      $msgs.innerHTML = messages.map(m => `
-        <div class="msg ${m.role}">
-          <div class="role">${m.role}</div>
-          <div>${m.content}</div>
-        </div>`).join("");
-      $msgs.scrollTop = $msgs.scrollHeight;
-    }
+    onAuthStateChanged(auth, async (u)=>{ if(!u) await signInAnonymously(auth); else uid=u.uid; });
 
-    onAuthStateChanged(auth, async (user) => {
-      if (!user) {
-        await signInAnonymously(auth);
-      } else {
-        uid = user.uid;
-      }
-    });
-
-    $form.addEventListener("submit", async (e) => {
+    form.addEventListener('submit', async (e)=>{
       e.preventDefault();
-      const text = $input.value.trim();
-      if (!text || !uid) return;
-
-      messages.push({ role: "user", content: text });
-      render();
-      $input.value = "";
-      // chama a Function pelo rewrite /api/chat
-      const resp = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uid, chatId, messages })
+      const text = input.value.trim(); if(!text||!uid) return;
+      msgs.push({role:'user', content:text}); render(); input.value='';
+      const r = await fetch('/api/chat', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ uid, chatId, messages: msgs })
       });
-      const data = await resp.json();
-      messages.push({ role: "model", content: data.reply || "(sem resposta)" });
-      render();
+      const data = await r.json();
+      msgs.push({role:'model', content: data.reply || '(sem resposta)'}); render();
     });
   </script>
 </body>
