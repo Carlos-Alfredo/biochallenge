@@ -3,7 +3,7 @@
     "public": "public",
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
     "rewrites": [
-      { "source": "/webhook", "function": { "functionId": "webhook", "region": "us-central1" } }
+      { "source": "/api/chat", "function": { "functionId": "chat", "region": "us-central1" } }
     ]
   }
 }
