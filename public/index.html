@@ -22,12 +22,7 @@
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
     import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js";
-    const firebaseConfig = {
-      apiKey: "AIzaSyC7d5Ma_X9hr9Bvf_vztnpD7NZ5zBrzUGY",
-      authDomain: "biochallenge-database.firebaseapp.com",
-      projectId: "biochallenge-database",
-      appId: "1:303945570078:web:de1f33e0efa55459141b0f"
-    };
+    
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
 
