@@ -1,98 +1,73 @@
 import { onRequest } from "firebase-functions/v2/https";
 import * as admin from "firebase-admin";
-import axios from "axios";
-import crypto from "crypto";
+import corsLib from "cors";
 import { VertexAI } from "@google-cloud/vertexai";
 
-admin.initializeApp(); // uses default service account
+admin.initializeApp();
 const db = admin.firestore();
 
-// Read secrets from environment (set in step 5)
+// Configs via Secrets/Env (ver passo 6)
 const {
-  WHATSAPP_TOKEN,
-  WHATSAPP_PHONE_ID,
-  VERIFY_TOKEN,
   VERTEX_LOCATION = "us-central1",
-  GEMINI_MODEL = "gemini-2.5-flash",
+  GEMINI_MODEL = "gemini-2.5-flash"
 } = process.env;
 
-// Enable Vertex AI on this project and grant aiplatform.user to the Functions SA
+const cors = corsLib({ origin: true });
+
 const vertex = new VertexAI({
   project: process.env.GCLOUD_PROJECT,
-  location: VERTEX_LOCATION,
+  location: VERTEX_LOCATION
 });
 const model = vertex.getGenerativeModel({ model: GEMINI_MODEL });
 
-export const webhook = onRequest({ region: "us-central1" }, async (req, res) => {
-  // 1) Verification (GET)
-  if (req.method === "GET") {
-    const mode = req.query["hub.mode"];
-    const token = req.query["hub.verify_token"];
-    const challenge = req.query["hub.challenge"];
-    if (mode === "subscribe" && token === VERIFY_TOKEN) {
-      return res.status(200).send(challenge);
-    }
-    return res.sendStatus(403);
-  }
+export const chat = onRequest({ region: "us-central1" }, async (req, res) => {
+  // CORS (útil em dev e para emuladores)
+  await new Promise((resolve) => cors(req, res, resolve));
 
-  // 2) POST: (optional) validate signature for security
-  const sig = req.get("x-hub-signature-256");
-  const appSecret = process.env.APP_SECRET; // optional: set if you want signature check
-  if (sig && appSecret) {
-    const expected = "sha256=" + crypto.createHmac("sha256", appSecret).update(req.rawBody).digest("hex");
-    if (expected !== sig) return res.sendStatus(401);
-  }
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  if (req.method !== "POST") return res.status(405).send("Use POST");
 
   try {
-    const msg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-    if (!msg) return res.sendStatus(200);
+    const { uid, chatId, messages } = req.body || {};
+    // messages = [{role: "user"|"model"|"system", content: "texto"}]
 
-    const from = msg.from;                  // user phone (E.164)
-    const text = msg.text?.body?.trim() ?? "";
+    if (!uid || !Array.isArray(messages)) {
+      return res.status(400).json({ error: "uid e messages são obrigatórios" });
+    }
 
-    // Firestore: persist short history
-    const userRef = db.collection("whatsapp_users").doc(from);
-    const snap = await userRef.get();
-    const userData = snap.exists ? snap.data() : {};
-    const nowIso = new Date().toISOString();
+    // Opcional: sanitização/tamanho max do histórico
+    const trimmed = messages.slice(-12).map(m => ({
+      role: m.role, content: String(m.content || "").slice(0, 4000)
+    }));
 
-    await userRef.set({
-      lastMessageAt: nowIso,
-      lastText: text,
-      history: admin.firestore.FieldValue.arrayUnion({ at: nowIso, user: text }),
-    }, { merge: true });
+    // Converte para o formato do Gemini
+    const contents = trimmed.map(m => ({
+      role: m.role === "model" ? "model" : "user",
+      parts: [{ text: m.content }]
+    }));
 
-    // Gemini: generate a reply
-    const prompt = `Você é um assistente de rotina médica. Histórico curto: ${JSON.stringify(userData).slice(0, 800)}.
-Pergunta do usuário: ${text}
-Responda em PT-BR, breve e útil.`;
+    // Chamada ao Gemini
+    const gen = await model.generateContent({ contents });
+    const reply =
+      gen?.response?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "Desculpe, não consegui responder agora.";
 
-    const gen = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    });
-    const aiText = gen?.response?.candidates?.[0]?.content?.parts?.[0]?.text
-      || "Não consegui gerar uma resposta agora.";
+    // Persiste histórico no Firestore
+    const now = new Date().toISOString();
+    const convRef = db
+      .collection("users")
+      .doc(uid)
+      .collection("chats")
+      .doc(chatId || "default");
 
-    // Save bot reply
-    await userRef.set({
-      history: admin.firestore.FieldValue.arrayUnion({ at: nowIso, bot: aiText })
-    }, { merge: true });
+    await convRef.set({ updatedAt: now }, { merge: true });
+    await convRef
+      .collection("messages")
+      .add({ at: now, role: "model", content: reply });
 
-    // WhatsApp: send the reply
-    await axios.post(
-      `https://graph.facebook.com/v21.0/${WHATSAPP_PHONE_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to: from,
-        type: "text",
-        text: { body: aiText }
-      },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-    );
-
-    return res.sendStatus(200);
+    return res.status(200).json({ reply });
   } catch (e) {
-    console.error("Webhook error:", e?.response?.data || e);
-    return res.sendStatus(200);
+    console.error(e);
+    return res.status(500).json({ error: "LLM error" });
   }
 });
